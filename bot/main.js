@@ -87,6 +87,7 @@ var PokeGoWorker = function () {
     };
 
     self.destination = null;
+    self.destinationPokeStop = null;
     self.collectedPokeStops = [];
     self.transferingPokemons = [];
     self.unusedIncubators = [];
@@ -242,7 +243,10 @@ var PokeGoWorker = function () {
 
                 // sort eggs
                 self.character.eggs.sort((a, b) => {
-                    return a.egg_km_walked_target - b.egg_km_walked_target || a.id - b.id;
+                    if (Settings.sortEggs === 'asc') {
+                        return a.egg_km_walked_target - b.egg_km_walked_target || a.id - b.id;
+                    }
+                    return b.egg_km_walked_target - a.egg_km_walked_target || a.id - b.id;
                 });
 
                 // sort items
@@ -324,10 +328,12 @@ var PokeGoWorker = function () {
                 if (self.initialCleanup) {
                     self.initialCleanup = false;
                     self.cleaningPokemon();
-                    // schedule auto-clean every 30 minutes
+                    self.cleaningInventory();
+                    // schedule auto-clean
                     setInterval(() => {
                         self.cleaningPokemon();
-                    }, 600000);
+                        self.cleaningInventory();
+                    }, Settings.autoCleanInterval);
                 }
                 resolve();
             }).catch(err => {
@@ -431,6 +437,136 @@ var PokeGoWorker = function () {
         }
     }
 
+    self.cleaningInventory = function() {
+        if (!Settings.autoCleanInventory) {
+            return;
+        }
+
+        var recyclePercValue = Settings.autoCleanInventoryPercentage / 100;
+        if ((self.character.itemStorage * recyclePercValue) > self.character.totalItems) {
+            var inventoryPerc = Math.round((self.character.totalItems / self.character.itemStorage) * 100);
+            self.logger.info('[r] No inventory recycle (' + inventoryPerc + '%)');
+            return;
+        }
+
+        if (self.io) {
+            self.io.emit('cleaningInventory');
+        }
+        self.logger.info('[r] Recycle items...');
+        self.started = false;
+
+        var balls = {1: 0, 2: 0, 3: 0, 4: 0},
+            totalBalls = 0;
+        var potions = {101: 0, 102: 0, 103: 0, 104: 0},
+            totalPotions = 0;
+        var revives = {201: 0, 202: 0},
+            totalRevives = 0;
+        var berries = {701: 0, 702: 0, 703: 0, 704: 0, 705: 0},
+            totalBerries = 0;
+
+        for (var i = 0; i < self.character.items.length; i++) {
+            var item = self.character.items[i];
+            if (item.item_id in balls) {
+                totalBalls += item.count;
+                balls[item.item_id] += item.count;
+            }
+            if (item.item_id in potions) {
+                totalPotions += item.count;
+                potions[item.item_id] += item.count;
+            }
+            if (item.item_id in revives) {
+                totalRevives += item.count;
+                revives[item.item_id] += item.count;
+            }
+            if (item.item_id in berries) {
+                totalBerries += item.count;
+                berries[item.item_id] += item.count;
+            }
+        }
+
+        var recycles = [],
+            funcGatherRecycleItems = function(total, totalKeep, items) {
+                if (total <= totalKeep) {
+                    return;
+                }
+
+                var recycleAllAmount = total - totalKeep;
+                for (var item_id in items) {
+                    var name = ItemList[item_id];
+                    var currentAmount = items[item_id];
+                    var keep = currentAmount - recycleAllAmount;
+                    var recycle = 0;
+                    keep = (keep < 0 ? 0 : keep)
+                        + (name in Settings.itemsKeepSpecific ? Settings.itemsKeepSpecific[item_id] : 0);
+                    recycle = currentAmount - keep;
+                    if (recycle > 0) {
+                        recycleAllAmount -= recycle;
+                        recycles.push({item_id: item_id, amount: recycle});
+                    }
+                }
+            };
+
+        funcGatherRecycleItems(totalBalls, Settings.totalAmountOfPokeballsToKeep, balls);
+        funcGatherRecycleItems(totalPotions, Settings.totalAmountOfPotionsToKeep, potions);
+        funcGatherRecycleItems(totalRevives, Settings.totalAmountOfRevivesToKeep, revives);
+        funcGatherRecycleItems(totalBerries, Settings.totalAmountOfBerriesToKeep, berries);
+
+        if (recycles.length > 0) {
+
+            var cleanupLoop = setInterval(function() {
+                return new Promise(function(resolve, reject) {
+                    if (recycles.length > 0) {
+                        var data = recycles[0],
+                            item_id = data.item_id,
+                            amount = data.amount;
+                        self.client.recycleInventoryItem(item_id, amount).then(response => {
+                            if (response.result == 1) {
+                                var name = ItemList[item_id];
+                                self.logger.info('[r] Recycled ' + amount + 'x ' + name);
+                                self.io.emit('recycled', { item: item_id, amount: amount });
+                                recycles.splice(0, 1);
+                            }
+                            if (recycles.length == 0) {
+                                self.logger.info('[t] Recycle finished!');
+                                clearInterval(cleanupLoop);
+                                self.started = true;
+                                self.getTrainerInformation().then(() => {
+                                    if (self.io) {
+                                        self.io.emit('inventoryCleaned');
+                                    }
+                                    resolve();
+                                }).catch((err) => {
+                                    self.logger.error(err);
+                                    reject(err);
+                                });
+                            }
+                            else {
+                                resolve();
+                            }
+                        }).catch((err) => {
+                            self.verifyErrorRestart(err);
+                        });
+                    }
+                    else {
+                        clearInterval(cleanupLoop);
+                        self.started = true;
+                        if (self.io) {
+                            self.io.emit('inventoryCleaned');
+                        }
+                        self.logger.info('[t] Recycle finished!');
+                    }
+                }).then((a) => {
+                    return null;
+                }).catch(err => {
+                    self.verifyErrorRestart(err);
+                });
+            }, 2000);
+        } else {
+            self.started = true;
+            self.logger.info('[t] Recycle finished!');
+        }
+    };
+
     self.collectPokeStop = function (pokestop) {
         return new Promise(function(resolve, reject) {
             self.client.fortSearch(pokestop.id, pokestop.latitude, pokestop.longitude).then(response => {
@@ -526,38 +662,122 @@ var PokeGoWorker = function () {
     }
 
     self.moveCharacter = function () {
-        if (Settings.movement == "random") {
-            // if we don't have any destination, create one..
-            if (!self.destination) {
-                self.destination = self.getRandomLocation(Settings.centerLatitude, Settings.centerLongitude, Settings.radius);
+        if (!Settings.movement || Settings.movement === 'disabled') {
+            return;
+        }
+
+        if (Settings.movement === 'pokestop') {
+            if (self.moveCharacterToPokeStop()) {
+                return;
             }
 
+            self.logger.error('[m] Fallback to random walking');
+        }
+
+        // if we don't have any destination, create one..
+        self.destinationPokeStop = null;
+        if (!self.destination) {
+            self.destination = self.getRandomLocation(Settings.centerLatitude, Settings.centerLongitude, Settings.radius);
+        }
+
+        if (self.io) {
+            self.io.emit('destination', { destination: self.destination });
+        }
+
+        // move to our destination bit by bit. calculate bearing and new step coordinate
+        var bearing = self.calculateBearing(self.character.location, self.destination);
+        var nextStep = Geolib.computeDestinationPoint(self.character.location, Settings.step, bearing);
+
+        // if the distance between next step and destination is less than step, remove destination
+        if (Geolib.getDistance(self.destination, nextStep) <= Settings.step) {
+            self.destination = null;
             if (self.io) {
                 self.io.emit('destination', { destination: self.destination });
             }
 
-            // move to our destination bit by bit. calculate bearing and new step coordinate
-            var bearing = self.calculateBearing(self.character.location, self.destination);
-            var nextStep = Geolib.computeDestinationPoint(self.character.location, Settings.step, bearing);
+            return;
+        }
 
-            // if the distance between next step and destination is less than step, remove destination
-            if (Geolib.getDistance(self.destination, nextStep) <= Settings.step) {
-                self.destination = null;
-                if (self.io) {
-                    self.io.emit('destination', { destination: self.destination });
+        // step the character
+        var location = {
+            latitude: nextStep.latitude,
+            longitude: nextStep.longitude
+        };
+        self.client.setPosition(location.latitude, location.longitude);
+        self.character.location = location;
+        self.logger.info('[m] Move to ' + location.latitude + ', ' + location.longitude);
+    }
+
+    self.moveCharacterToPokeStop = function () {
+        if (Settings.movement !== 'pokestop') {
+            return false;
+        }
+
+        if (!self.hbData.pokeStops.length) {
+            self.logger.error('[x] No stops found');
+            return false;
+        }
+
+        if (!self.destination || !self.destinationPokeStop) {
+            var pokeStops = [];
+            for (let i = 0; i < self.hbData.pokeStops.length; i++) {
+                var pokeStop = self.hbData.pokeStops[i];
+                if (!pokeStop.enabled) {
+                    continue;
                 }
+
+                var pokeStopLocation = {
+                    latitude: pokeStop.latitude,
+                    longitude: pokeStop.longitude
+                };
+                var pokeStopBearing = self.calculateBearing(self.character.location, pokeStopLocation);
+                var pokeStopNextStep = Geolib.computeDestinationPoint(self.character.location, Settings.step, pokeStopBearing);
+                var pokeStopDistance = Geolib.getDistance(pokeStopLocation, pokeStopNextStep);
+                pokeStops.push({pokeStop: pokeStop, location: pokeStopLocation, distance: pokeStopDistance, nextStep: pokeStopNextStep});
             }
 
-            // step the character
-            var location = {
-                    latitude: nextStep.latitude,
-                    longitude: nextStep.longitude
-                };
-            self.client.setPosition(location.latitude, location.longitude);
-            self.character.location = location;
-            self.logger.info('[m] Move to ' + location.latitude + ', ' + location.longitude);
+            pokeStops.sort(function (a, b) {
+                return a.distance - b.distance;
+            });
+
+            var nearstStop = pokeStops[0];
+            self.logger.info('[m] Next target PokeStop: ', nearstStop.pokeStop.id, '(' + nearstStop.distance + 'm)');
+            self.destination = nearstStop.location;
+            self.destinationPokeStop = nearstStop.pokeStop.id;
         }
-    }
+
+
+        if (self.io) {
+            self.io.emit('destination', { destination: self.destination });
+        }
+
+        // move to our destination bit by bit. calculate bearing and new step coordinate
+        var bearing = self.calculateBearing(self.character.location, self.destination);
+        var nextStep = Geolib.computeDestinationPoint(self.character.location, Settings.step, bearing);
+        var nextDistance = Geolib.getDistance(self.destination, nextStep);
+
+        // if the distance between next step and destination is less than step, remove destination
+        if (nextDistance <= Settings.step) {
+            self.destination = null;
+            self.destinationPokeStop = null;
+            if (self.io) {
+                self.io.emit('destination', { destination: self.destination });
+            }
+
+            return true;
+        }
+
+        // step the character
+        var location = {
+            latitude: nextStep.latitude,
+            longitude: nextStep.longitude
+        };
+        self.client.setPosition(location.latitude, location.longitude);
+        self.character.location = location;
+        self.logger.info('[m] Move to PokeStop over ' + location.latitude + ', ' + location.longitude);
+
+        return true;
+    };
 
     self.heartbeat = function () {
         return new Promise(function(resolve, reject) {
@@ -645,6 +865,10 @@ var PokeGoWorker = function () {
                                     found = true;
                                     // collect item from this pokestop
                                     self.collectPokeStop(pokeStop).then(() => {
+                                        if (Settings.movement == 'pokestop' && self.destinationPokeStop === pokeStop.id) {
+                                            self.destinationPokeStop = null;
+                                        }
+
                                         return self.getTrainerInformation().then(() => {
                                             self.doLoop = true;
                                             if (process.env.NODE_ENV == 'development')

@@ -1,20 +1,48 @@
 {
-    "username": "username",
-    "password": "password",
-    "provider": "google",
-    "centerLatitude": 0,
-    "centerLongitude": 0,
-    "centerAltitude": 0,
+    "username": "goddy1206",
+    "password": "goddy1206",
+    "provider": "ptc",
+    "centerLatitude": 34.008818,
+    "centerLongitude": -118.497489,
+    "centerAltitude": 10,
     "radius": 250,
     "loopInterval": 7000,
     "autoCleanPokemon": true,
+    "autoCleanInventory": false,
+    "autoCleanInventoryPercentage": 90,
+    "autoCleanInterval": 60000,
+    "totalAmountOfPokeballsToKeep": 80,
+    "totalAmountOfPotionsToKeep": 100,
+    "totalAmountOfRevivesToKeep": 20,
+    "totalAmountOfBerriesToKeep": 20,
+    "itemsKeepSpecific": {
+        "Pokeball": 80
+    },
     "pokemonKeepNumber": 3,
-    "pokemonKeepSpecific": [{ "name": "pidgey", "limit": 6 }, { "name": "caterpie", "limit": 6 }, { "name": "weedle", "limit": 6 }, { "name": "eevee", "limit": 4 }],
+    "pokemonKeepSpecific": [
+        {
+            "name": "pidgey",
+            "limit": 6
+        },
+        {
+            "name": "caterpie",
+            "limit": 6
+        },
+        {
+            "name": "weedle",
+            "limit": 6
+        },
+        {
+            "name": "eevee",
+            "limit": 4
+        }
+    ],
     "step": 17,
     "ball": 1,
-    "movement": "random",
+    "movement": "pokestop",
     "collect": true,
     "encounter": true,
+    "sortEggs": "asc",
     "target": "all",
     "specificTargets": ["doduo", "rattata"]
 }
